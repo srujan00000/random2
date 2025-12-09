@@ -1,0 +1,27 @@
+# Content Generation Agent - Dependencies
+# Python 3.12
+
+# OpenAI SDK
+openai
+
+# LangChain
+langchain
+langchain-openai
+langchain-core
+
+# LangGraph for workflow orchestration
+langgraph
+
+# FastAPI + SSE server
+fastapi
+sse-starlette
+uvicorn
+
+# Environment variables
+python-dotenv
+
+# HTTP requests (for downloading images)
+requests
+
+# Frontend
+streamlit
