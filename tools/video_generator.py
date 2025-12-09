@@ -4,6 +4,7 @@ Generates videos based on text prompts and saves locally.
 """
 
 import os
+import logging
 from datetime import datetime
 from pathlib import Path
 from langchain.tools import tool
@@ -11,6 +12,10 @@ from openai import OpenAI
 from config import get_current_config
 from .design_checker import load_design_guidelines
 from .policy_checker import load_policy_guidelines
+
+# Setup logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 
 def get_client():
@@ -64,63 +69,106 @@ def get_aspect_ratio_options() -> str:
     return "\n".join(options)
 
 
+def extract_key_guidelines(text: str, max_chars: int = 1500) -> str:
+    """
+    Extract key requirements from guidelines, prioritizing critical rules.
+    More comprehensive than just bullet points, but respects length limits.
+    """
+    if not text or not text.strip():
+        return ""
+    
+    # Key sections/phrases to prioritize
+    priority_keywords = [
+        "color", "palette", "#", "font", "typography", "open sans",
+        "flat", "2d", "geometric", "bauhaus", "minimalist",
+        "no gradient", "no shadow", "prohibited", "must", "only",
+        "accessibility", "contrast", "wcag", "smooth", "transition"
+    ]
+    
+    lines = text.splitlines()
+    priority_lines = []
+    other_lines = []
+    
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lower = stripped.lower()
+        # Check if line contains priority keywords
+        if any(kw in lower for kw in priority_keywords):
+            priority_lines.append(stripped)
+        elif stripped.startswith("-") or stripped.startswith("•"):
+            other_lines.append(stripped)
+    
+    # Combine priority lines first, then other lines
+    result_lines = priority_lines + other_lines
+    result = "\n".join(result_lines)
+    
+    # Truncate if too long
+    if len(result) > max_chars:
+        result = result[:max_chars] + "..."
+        logger.warning(f"Guidelines truncated to {max_chars} chars")
+    
+    return result
+
+
 def build_enriched_prompt(prompt: str, cfg, aspect_ratio: str, size: str, seconds: int) -> str:
     """
-    Build a prompt that includes FULL design and policy guidelines,
-    with strict compliance instructions to ensure the model follows them (video-focused).
+    Build a prompt that includes key design and policy guidelines,
+    with strict compliance instructions while respecting API limits (video-focused).
     """
     try:
-        design_guidelines = load_design_guidelines()
-    except Exception:
+        design_raw = load_design_guidelines()
+        design_guidelines = extract_key_guidelines(design_raw, 1200)
+        logger.info("Design guidelines loaded successfully")
+    except Exception as e:
+        logger.error(f"Failed to load design guidelines: {e}")
         design_guidelines = ""
+    
     try:
-        policy_guidelines = load_policy_guidelines()
-    except Exception:
+        policy_raw = load_policy_guidelines()
+        policy_guidelines = extract_key_guidelines(policy_raw, 800)
+        logger.info("Policy guidelines loaded successfully")
+    except Exception as e:
+        logger.error(f"Failed to load policy guidelines: {e}")
         policy_guidelines = ""
 
     # Fallbacks if guideline files are unavailable
     if not design_guidelines.strip():
-        design_guidelines = """Default Design Guidelines:
-- Use ONLY these colors: #FE7743 (Orange), #EFEEEA (Background), #273F4F (Navy), #000000 (Black)
-- Flat 2D style only - NO gradients, shadows, or 3D effects
-- Geometric shapes and motion only (circles, squares, rectangles, lines, triangles)
-- Bauhaus-inspired: balanced asymmetry, interlocking forms, clear visual hierarchy
-- Minimalist and clean composition with ample negative space
+        design_guidelines = """CRITICAL DESIGN RULES:
+- Colors: ONLY use #FE7743 (Orange), #EFEEEA (Background), #273F4F (Navy), #000000 (Black)
+- Style: Flat 2D ONLY - NO gradients, shadows, or 3D effects
+- Shapes: Geometric motion only (circles, squares, rectangles, lines, triangles)
+- Bauhaus-inspired: balanced asymmetry, interlocking forms
 - Typography: Open Sans font ONLY
 - Smooth transitions and stable footage
 - Minimum 1080p resolution"""
     
     if not policy_guidelines.strip():
-        policy_guidelines = """Default Policy Guidelines:
-- No prohibited/sensitive content (violence, discrimination, explicit)
+        policy_guidelines = """CRITICAL POLICY RULES:
+- No prohibited/sensitive content
 - Professional, authentic tone
-- No misleading claims or exaggerated statements
-- No copyright violations - 100% original content only
-- Accessible design with proper contrast (WCAG 2.1 AA)
-- No real individuals or public figures
+- No copyright violations
+- Accessible design (WCAG 2.1 AA contrast)
+- No real individuals
 - Avoid flashing content for accessibility"""
 
-    return f"""=== MANDATORY COMPLIANCE INSTRUCTIONS ===
-You MUST strictly follow ALL guidelines below. These guidelines take PRIORITY over the user's creative request.
-If ANY part of the user's request conflicts with these guidelines, you MUST prioritize the guidelines.
-Non-compliance is NOT acceptable.
+    enriched = f"""STRICT COMPLIANCE REQUIRED - Follow these guidelines exactly:
 
-=== DESIGN GUIDELINES (MANDATORY) ===
+DESIGN REQUIREMENTS:
 {design_guidelines}
 
-=== POLICY GUIDELINES (MANDATORY) ===
+POLICY REQUIREMENTS:
 {policy_guidelines}
 
-=== VIDEO OUTPUT REQUIREMENTS ===
-- Aspect ratio: {aspect_ratio}
-- Resolution: {size}
-- Duration: {seconds} seconds
+VIDEO OUTPUT: {aspect_ratio} ({size}), {seconds} seconds
 
-=== USER'S CREATIVE REQUEST ===
-{prompt}
+REQUEST: {prompt}
 
-=== FINAL REMINDER ===
-Generate the video following ALL guidelines above. Use ONLY the approved color palette, flat 2D geometric style with smooth motion, and Open Sans typography. Ensure full compliance with both design and policy guidelines. Maintain stable footage and accessible content."""
+REMINDER: Use ONLY approved colors (#FE7743, #EFEEEA, #273F4F, #000000), flat 2D geometric style with smooth motion, Open Sans typography."""
+
+    logger.info(f"Built enriched prompt, length: {len(enriched)} chars")
+    return enriched
     
 
 @tool
@@ -164,18 +212,24 @@ def generate_video(
         size = ASPECT_RATIO_MAP[aspect_ratio]["size"]
         ratio_info = ASPECT_RATIO_MAP[aspect_ratio]
         
+        logger.info(f"Starting video generation: aspect_ratio={aspect_ratio}, size={size}, seconds={seconds}")
+        
         # Get client and generate video using Sora
         client = get_client()
         cfg = get_current_config()
         enriched_prompt = build_enriched_prompt(prompt, cfg, aspect_ratio, size, seconds)
+        
+        logger.info("Sending request to Sora API...")
         response = client.videos.create(
             model="sora-2",
             prompt=enriched_prompt,
             size=size,
             seconds=seconds
         )
+        logger.info("Sora API response received")
         
         video_url = response.data[0].url
+        logger.info(f"Video URL received: {video_url[:50]}...")
         
         # Generate filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -187,13 +241,17 @@ def generate_video(
         
         try:
             # Use the videos.download_content method
+            logger.info("Downloading video content...")
             video_content = client.videos.download_content(response.data[0].id)
             with open(local_path, 'wb') as f:
                 f.write(video_content)
             download_status = f"💾 Local Path: {local_path.absolute()}"
+            logger.info(f"Video saved to {local_path.absolute()}")
         except Exception as download_error:
+            logger.warning(f"Local download failed: {str(download_error)}")
             download_status = f"⚠️  Local download failed: {str(download_error)}\n   Use the URL to download manually."
         
+        logger.info("Video generation completed successfully")
         return f"""✅ Video Generated Successfully!
 
 🎬 Video URL: {video_url}
@@ -218,4 +276,6 @@ def generate_video(
 🔒 Guideline Context Applied: design + policy constraints included in the generation prompt."""
 
     except Exception as e:
+        logger.error(f"Video generation failed: {str(e)}", exc_info=True)
         return f"❌ Video generation failed: {str(e)}"
+
